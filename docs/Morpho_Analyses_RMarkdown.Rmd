@@ -1,0 +1,237 @@
+---
+title: "Morphological phylogeny with `phangorn`"
+author: 
+- name: Iris Bardel-Kahr
+  affiliation: University of Graz
+  email: iris.bardel-kahr@uni-graz.at
+output: html_document
+bibliography: references_mm.bib
+date: "Last compiled on `r format(Sys.time(), '%d %B, %Y')`"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+setwd("Z:/Pfingstl-Kerschbaumer/Genetik_Iris/Morpho_Matrix/")
+#knitr::opts_chunk$set(fig.width=12, fig.height=8) #hope this works...
+```
+
+## Load packages
+
+The package `phangorn` [@phangorn] (with the dependency `ape` [@ape]) was used for this analyses (starting from a **nexus** file). If you start with a **.csv** file, `dplyr` [@dplyr] and `tidyr` [@tidyr] can be used for data manipulation.  
+`set.seed` is used to get reproducible results.
+  
+```{r packages, message=F}
+#install.packages("ape")
+#install.packages("phangorn")
+
+# for the latest development version, you can use:
+#remotes::install_github("KlausVigo/phangorn")
+
+#install.packages("tidyr")
+#install.packages("dplyr")
+library(ape)
+library(phangorn)
+library(tidyr)
+library(dplyr)
+set.seed(102)
+```
+\
+
+## Load data
+
+#### from a **.csv** file
+
+```{r load_csv}
+morpho_data <- read.csv("Matrix.csv")
+```
+\
+
+After reading in the **.csv** file, the data has to be changed into the right format to be read as `phyDat` by `phangorn`.
+  
+  
+```{r change_csv}
+morpho_data$species <- gsub(" ", "_", morpho_data$species)
+
+morpho_data <- morpho_data %>% 
+  mutate_if(is.numeric, as.character) %>%
+  pivot_longer(cols = -species, names_to = "trait", values_to = "value") %>%
+  pivot_wider(names_from = species, values_from = value) %>%
+  select(-trait)
+```
+\
+  
+#### from a **.nex** (nexus) file
+
+```{r read_nex}
+morpho_data <- read.nexus.data("morpho_matrix_full_names.nex")
+```
+\
+  
+#### `phyDat` format for subsequent analyses
+
+For morphometric data, `type="USER"` needs to be selected and a vector reflecting the data has to be given to `levels`. Here we have the states 0 to 8.
+
+```{r phydat}
+morpho_pd <- phyDat(morpho_data, type = "USER", levels=as.character(0:8), ambiguity="?")
+```
+\
+
+## Parsimony Trees
+
+`pratchet` from *phangorn* uses the parsimony ratchet [@nixon1999parsimony]. `all=TRUE` gives back all possible trees with the same parsimony score. `k` (minimum number of iterations when no change in the parsimony score is detected) around **50** is sufficient for this analysis. For unordered data `method="fitch"` (the default) is much quicker and gives back the same results as `method="sankoff"`.
+The following `acctran` assigns branch lengths to the trees.
+
+```{r parsimony, message=F, cache=TRUE}
+tree_pars <- pratchet(morpho_pd, k = 50, minit = 1000,
+                     maxit = 100000, all=TRUE, trace = 0)
+tree_pars <- acctran(tree_pars, morpho_pd)
+tree_pars
+```
+\
+
+There are **14** trees with lowest parsimony score.  
+The outgroup is *Collohmannia johnstoni*, so we root the trees accordingly.
+
+```{r root}
+rooted_tree <- root(tree_pars, "Collohmannia_johnstoni", resolve.root=TRUE, edgelabel=TRUE)
+```
+\
+
+To balance out the root, we write a function and apply it to all trees in the `multiPhylo` object.
+
+```{r pretty_root}
+pretty_root <- function(x){
+  root <-  getRoot(x)
+  ind <- which(x$edge[,1] == root)
+  el <- sum(x$edge.length[ind]) / 2
+  x$edge.length[ind] <- el
+  x$node.label[1] = ""
+  x
+} 
+
+for (i in 1:length(rooted_tree)){
+  rooted_tree[[i]] <- pretty_root(rooted_tree[[i]])
+}
+```
+\
+
+We can plot the first tree with the bootstrap values (rounded to two digits) as node labels.
+
+```{r plot_pars_trees, fig.width=16, fig.height=20}
+par(mar = c(1,1,4,1))
+plot(rooted_tree[[1]], type = "phy", edge.width=1) 
+title(main="Parsimony tree")
+nodelabels(round(as.numeric(rooted_tree[[1]]$node.label), digits = 2), frame = "none", adj=c(1,1), cex=.75)
+add.scale.bar()
+```
+\
+\
+
+We could also plot all trees, to get a quick overview (in this case without the node labels):
+
+```{r plot_pars_tree_wn, eval=F}
+par(mar = c(1,1,4,1))
+plot(rooted_tree, type = "phy", cex=.5, edge.width=2)
+```
+\
+
+For this paper, we wrote the trees in *Newick*-format to edit them in *FigTree* [@figtree]. All trees can be written into one file.
+
+```{r write_pars_trees, eval=F}
+write.tree(tree_pars, file = "ParsimonyTrees.trees")
+```
+\
+
+## Maximum Likelihood Trees
+  
+  
+For maximum likelihood trees, the function `pml_bb` from *phangorn* can be used. For **unordered morphometric data**, `model="ER+ASC"` should be used. 
+
+- **ER**: equal rates, all transitions occur at the same rate  
+- **ASC**: ascertainment bias correction [@lewis2001likelihood] corrects for the fact that there are no constant sites (as is mostly the case with morphometric data); otherwise the branch lengths may be overestimated  
+
+We calculate one tree with a strict clock (`method="ultrametric"`) and one with `method="unrooted"`. Ultrafast bootstrapping [@minh2013] values are calculated with this function automatically.
+  
+  
+```{r ml_trees, cache=T}
+# strict clock
+ml_ULTRA <- pml_bb(morpho_pd, model="ER+ASC", rearrangement = "stochastic",
+                       method="ultrametric",
+                       control=pml.control(trace = 0))
+
+# unrooted
+ml <- pml_bb(morpho_pd, model="ER+ASC", rearrangement = "stochastic",
+                 control=pml.control(trace = 0))
+```
+\
+
+If we only want the tree object, we can get it with:
+``` {r ml_bootstrap}
+# strict clock
+tree_ml_ULTRA <- ml_ULTRA$tree
+
+# unrooted
+tree_ml <- ml$tree
+```
+\
+
+Rooting (or in the case of the ultrametric tree: rerooting) the tree can again be done with `root` and our function `pretty_root`, with the outgroup *Collohmannia johnstoni*.
+
+```{r root_ml}
+# strict clock
+rooted_ml_ULTRA_tree <- root(tree_ml_ULTRA, "Collohmannia_johnstoni", resolve.root = TRUE,
+                             edgelabel=TRUE)
+rooted_ml_ULTRA_tree <- pretty_root(rooted_ml_ULTRA_tree)
+
+# relaxed clock
+rooted_ml_tree <- root(tree_ml, "Collohmannia_johnstoni", resolve.root = TRUE,
+                             edgelabel=TRUE)
+rooted_ml_tree <- pretty_root(rooted_ml_tree)
+```
+\
+
+Then we can plot the two trees.
+
+```{r plot_ml_trees, fig.width=16, fig.height=40}
+par(mar = c(1,1,4,1), mfrow=2:1)
+plot(rooted_ml_ULTRA_tree, type = "phy", edge.width=1) 
+title(main = "Strict clock (ultrametric)")
+nodelabels(round(as.numeric(rooted_ml_ULTRA_tree$node.label), digits = 2), frame = "none", adj=c(1,1), cex=.75)
+add.scale.bar()
+
+plot(rooted_ml_ULTRA_tree, type = "phy", edge.width=1) 
+title(main = "Unrooted method")
+nodelabels(round(as.numeric(rooted_ml_ULTRA_tree$node.label), digits = 2), frame = "none", adj=c(1,1), cex=.75)
+add.scale.bar()
+```
+\
+\
+
+For this paper, we also wrote those trees in *Newick*-format, to edit them in *FigTree* [@figtree].
+  
+  
+```{r write_ml_newick, eval=F}
+write.tree(tree_ml_ULTRA, file = "MLTree_ULTRA.tree")
+write.tree(tree_ml, file = "MLTree.tree")
+```
+\
+
+## Bayesian inference
+
+The bayesian trees were inferred with BEAST2 [@drummond2012bayesian; @bouckaert2019beast] using the *morph-models* package [@lewis2001likelihood]. The *nexus*-file was loaded into *BEAUti* and most of the default settings were used. Chain length was set to 50 million, trace and tree log every 1000. The random seed was set to 102.
+Again, we used two clock methods: 
+
+- strict clock [@zuckerkandl1965molecules]
+- relaxed clock [@drummond2006relaxed]
+
+The trace was later inspected in *Tracer* [@rambaut2018posterior] and the *.trees* files were summarized using the *TreeAnnotator* tool (maximum clade credibility tree with 0.5 posterior probability limit, median height nodes and 25% burn-in). For visualising *FigTree* [@figtree] was used.
+\
+\
+
+## Session Info
+
+```{r sessionInfo, echo=FALSE}
+sessionInfo()
+```
+
+## References
